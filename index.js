@@ -4,6 +4,9 @@ var http = require('http');
 var https = require('https');
 var urllib = require('url');
 var mkdirp = require('mkdirp');
+var isString = require('is-string');
+var isObject = require('is-object');
+var Promise = require('bluebird');
 
 module.exports = download;
 
@@ -22,24 +25,42 @@ function download(url, destination, callback) {
 	request = getRequestInstance(url);
 	savePath = getSavePath(url, destination);
 
+	var errorHandler;
+	var successHandler;
+	if (callback) {
+		errorHandler = function (error) {
+			callback(error);
+		};
+		successHandler = function () {
+			callback(false, savePath);
+		}
+	}
+	else {
+		errorHandler = function (error) {
+			throw error;
+		};
+		successHandler = function () {};
+	}
+
 	request.get(url, function responseHandler(response) {
 		var status = response.statusCode;
 
 		if (status === 200) {
-			writeStream(response, savePath, callback);
+			var writerPromise = writeStream(response, savePath, callback);
+			response.on("end", function finished(){
+				writerPromise
+					.then(function (ostream){
+						ostream.on("finish", successHandler);
+						ostream.on("error", errorHandler);
+					})
+					.catch(errorHandler);
+			});
 		} else if(status > 300 && status < 400 && response.headers.location) {
 			var redirectURL = response.headers.location;
 			request.get(redirectURL, responseHandler).on('error', errorHandler);
 		} else {
 			callback(new Error("Status code: " + status));
-			return;
 		}
-
-		response.on("end", function finished(){
-			if (callback) {
-				callback(false, savePath);
-			}
-		});
 	}).on('error', errorHandler);
 }
 
@@ -54,33 +75,41 @@ function getRequestInstance(url) {
 
 function getSavePath(url, destination) {
 	var pathName = url.pathname;
-	var fileName = path.basename(pathName);
+	var resourceName = path.basename(pathName);
+
+	if (isObject(destination)) {
+		var dir = destination.dir;
+		if (!dir) {
+			throw new Error("Missing require field 'dir' in destination.");
+		}
+		var fileName = destination.fileName || resourceName;
+		return path.resolve(dir, fileName);
+	}
+	else if (!isString(destination)) {
+		throw new Error("Invalid destination; must be a string or object.");
+	}
 
 	// Check if we got an absolute path or we need to construct it
 	if (path.extname(destination).length > 0) {
 		return destination;
 	}
 
-	return path.join(destination, fileName);
+	return path.join(destination, resourceName);
 }
 
-function writeStream(response, savePath, callback) {
+function writeStream(response, savePath) {
 	var dirPath = path.dirname(savePath);
-
-	mkdirp(dirPath, function(error) { 
-		if (error) {
-			callback(error);
-			return;
-		}
-		var resource = fs.createWriteStream(savePath)
-		response.pipe(resource);
+	return new Promise(function (resolve, reject) {
+		mkdirp(dirPath, function(error) {
+			if (error) {
+				reject(error);
+				return;
+			}
+			var resource = fs.createWriteStream(savePath)
+			response.pipe(resource);
+			resolve(resource);
+		});
 	});
-}
-
-function errorHandler(error) {
-	if (callback) { 
-		callback(error); 
-	}
 }
 
 // ... some sh***y dude didn't put his project on github
